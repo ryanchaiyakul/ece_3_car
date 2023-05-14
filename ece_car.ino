@@ -1,6 +1,15 @@
 #include <ECE3.h>
 
 /**
+ * TODO:
+ * 
+ * Implement mechanism to prevent crossfiring IR sensors causing a donut
+ * Test whether bounds are necessary for the PID output
+ * Implement algorithm that detects whether we are off the path
+ * Implements algorithm that searches for a path
+ */
+
+/**
  * General Constants
  */
 
@@ -44,7 +53,7 @@ const int IR_DIVISOR = 4;
 const int FUSION_OFFSET = 80;
 
 /**
- * Pins
+ * Pins and Physical constants
  */
 
 const int L_NSLP_PIN = 31; // nslp ==> awake & ready for PWM
@@ -54,12 +63,63 @@ const int R_NSLP_PIN = 11; // nslp ==> awake & ready for PWM
 const int R_DIR_PIN = 30;
 const int R_PWM_PIN = 39;
 
-/**
- * Values
-*/
 const int sensorCount = 8;
+
+/**
+ * Global variables
+*/
 uint16_t sensorValues[sensorCount]; // right -> left, 0 -> 7
 int prevError;
+
+/**
+ * Helper function to update sensorValues using ECE3 library
+ */
+void updateValues() {
+  ECE3_read_IR(sensorValues);
+}
+
+/**
+ * Returns the calculated fusion output of the sensorValues array
+ * 
+ * DOES NOT UPDATE IT
+ * 
+ * TODO:
+ * 
+ * Implement prevention against crosspiece (2500s across all sensors)
+ */
+int getFusionOutput() {
+    return((- IR_WEIGHT[0] * (IR_FACTOR_0 * (sensorValues[0]-IR_MIN_0))
+            - IR_WEIGHT[1] * (IR_FACTOR_1 * (sensorValues[1]-IR_MIN_1))
+            - IR_WEIGHT[2] * (IR_FACTOR_2 * (sensorValues[2]-IR_MIN_2))
+            - IR_WEIGHT[3] * (IR_FACTOR_3 * (sensorValues[3]-IR_MIN_3))
+            + IR_WEIGHT[3] * (IR_FACTOR_4 * (sensorValues[4]-IR_MIN_4))
+            + IR_WEIGHT[2] * (IR_FACTOR_5 * (sensorValues[5]-IR_MIN_5))
+            + IR_WEIGHT[1] * (IR_FACTOR_6 * (sensorValues[6]-IR_MIN_6))
+            + IR_WEIGHT[0] * (IR_FACTOR_7 * (sensorValues[7]-IR_MIN_7)))
+            /IR_DIVISOR) - FUSION_OFFSET;
+}
+
+/**
+ * Returns offset to add and minus from BASE_SPEED for the left and right pwn signal respectively
+ * 
+ * TODO:
+ * 
+ * Implement bounds to prevent negative values (May not be necessary and may be harmful by increasing delay)
+ */
+int getPIDOutput(int error) {
+    int ret = KP * INVERTED * error + KD * INVERTED * (error - prevError);
+    prevError = error;
+    return ret;
+}
+
+/**
+ * Updates the PWM pins with a new speed. (- steers to the left and + steers to the right)
+ */
+void writeWheels(int offset) {
+
+    analogWrite(L_PWM_PIN, BASE_SPEED - offset);
+    analogWrite(R_PWM_PIN, BASE_SPEED + offset);
+}
 
 void setup() {
     ECE3_Init();
@@ -81,13 +141,18 @@ void setup() {
     digitalWrite(R_DIR_PIN,LOW);
     digitalWrite(R_NSLP_PIN,HIGH);
 
-    // Set Previous Error
-    ECE3_read_IR(sensorValues);
+    // Set Initial Previous Error
+    updateValues();
     prevError = getFusionOutput();
     
     //Serial.begin(9600);
 }
 
+/**
+ * Legacy code to print out sensorValues while testing
+ * 
+ * REMOVE DURING FINAL VERSION
+ */
 void printSensorValues() {
     for (int i = 0; i < sensorCount; i++) {
       Serial.print(sensorValues[i]);
@@ -96,36 +161,11 @@ void printSensorValues() {
     Serial.print("\n");
 }
 
-int getFusionOutput() {
-    return ((- IR_WEIGHT[0] * (IR_FACTOR_0 * (sensorValues[0]-IR_MIN_0))
-            - IR_WEIGHT[1] * (IR_FACTOR_1 * (sensorValues[1]-IR_MIN_1))
-            - IR_WEIGHT[2] * (IR_FACTOR_2 * (sensorValues[2]-IR_MIN_2))
-            - IR_WEIGHT[3] * (IR_FACTOR_3 * (sensorValues[3]-IR_MIN_3))
-            + IR_WEIGHT[3] * (IR_FACTOR_4 * (sensorValues[4]-IR_MIN_4))
-            + IR_WEIGHT[2] * (IR_FACTOR_5 * (sensorValues[5]-IR_MIN_5))
-            + IR_WEIGHT[1] * (IR_FACTOR_6 * (sensorValues[6]-IR_MIN_6))
-            + IR_WEIGHT[0] * (IR_FACTOR_7 * (sensorValues[7]-IR_MIN_7)))
-            /IR_DIVISOR) - FUSION_OFFSET;
-}
-
-int getPIDOutput() {
-    int error = getFusionOutput();
-    //Serial.println(error);
-    int ret = KP * INVERTED * error + KD * INVERTED * (error - prevError);
-    prevError = error;
-    return ret;
-}
-
-void writeWheels() {
-    int offset = getPIDOutput();
-    //Serial.println(offset);
-    analogWrite(L_PWM_PIN, BASE_SPEED - offset);
-    analogWrite(R_PWM_PIN, BASE_SPEED + offset);
-}
-
+/**
+ * Primary execution loop
+ */
 void loop() {
-  ECE3_read_IR(sensorValues);
-  //Serial.println(getFusionOutput());
-  writeWheels();
-  //delay(500);
+  updateValues();
+  int error = getFusionOutput();
+  writeWheels(getPIDOutput(error));
 }
