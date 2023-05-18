@@ -13,7 +13,8 @@
  * General Constants
  */
 
-const int BASE_SPEED = 50;  // 0-255
+const int BASE_SPEED = 50;          // 0-255
+const int BLACK_THRESHOLD = 2000;   // Loest value from 0-2500 that corresponds to being on top of a black line
 
 /**
  * PID Constants
@@ -50,7 +51,7 @@ const float IR_FACTOR_7 = 0.5664438654;
 const int IR_WEIGHT[] = {8, 4, 2, 1};
 const int IR_DIVISOR = 4;
 
-const int FUSION_OFFSET = 80;
+const int FUSION_OFFSET = 0;
 
 /**
  * Pins and Physical constants
@@ -100,6 +101,20 @@ int getFusionOutput() {
 }
 
 /**
+ * Returns true when the IR sensors returns a value consistent with being on the horizontal line 
+ * indicating start/stop/turnaround
+ */
+bool onSolidLine() {
+    // If all of the sensors read black underneath them, it indicates the horizontal line
+    for (int i = 0 i < sensorCount; i++) {
+        if (sensorValues[i] < BLACK_THRESHOLD) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * Returns offset to add and minus from BASE_SPEED for the left and right pwn signal respectively
  * 
  * TODO:
@@ -119,6 +134,35 @@ void writeWheels(int offset) {
 
     analogWrite(L_PWM_PIN, BASE_SPEED - offset);
     analogWrite(R_PWM_PIN, BASE_SPEED + offset);
+}
+
+/*
+* This function changes the car speed gradually (in about 30 ms) from initial
+* speed to final speed. This non-instantaneous speed change reduces the load
+* on the plastic geartrain, and reduces the failure rate of the motors.
+*/
+void ChangeBaseSpeeds(int initialLeftSpd,int finalLeftSpd, int initialRightSpd,int finalRightSpd) {
+    int diffLeft = finalLeftSpd-initialLeftSpd;
+    int diffRight = finalRightSpd-initialRightSpd;
+    int stepIncrement = 20;
+    int numStepsLeft = abs(diffLeft)/stepIncrement;
+    int numStepsRight = abs(diffRight)/stepIncrement;
+    int numSteps = max(numStepsLeft,numStepsRight);
+    int pwmLeftVal = initialLeftSpd; // initialize left wheel speed
+    int pwmRightVal = initialRightSpd; // initialize right wheel speed
+    int deltaLeft = (diffLeft)/numSteps; // left in(de)crement
+    int deltaRight = (diffRight)/numSteps; // right in(de)crement
+    
+    for(int k=0;k<numSteps;k++) {
+        pwmLeftVal = pwmLeftVal + deltaLeft;
+        pwmRightVal = pwmRightVal + deltaRight;
+        analogWrite(left_pwm_pin,pwmLeftVal);
+        analogWrite(right_pwm_pin,pwmRightVal);
+        delay(30);
+    } // end for int k
+    
+    analogWrite(left_pwm_pin,finalLeftSpd);
+    analogWrite(right_pwm_pin,finalRightSpd);
 }
 
 void setup() {
@@ -160,6 +204,7 @@ void printSensorValues() {
     }
     Serial.print("\n");
 }
+
 
 /**
  * Primary execution loop
