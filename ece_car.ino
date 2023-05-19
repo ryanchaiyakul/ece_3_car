@@ -19,17 +19,22 @@ const int SEARCH_SPEED = 10;        // 0-255 speed when track is lost
 const int UTURN_SPEED = 10;         // 0-255 uturn speed
 
 const int BLACK_THRESHOLD = 2000;   // Loest value from 0-2500 that corresponds to being on top of a black line
+
+const int INACTIVE_DELAY = 1000;    // # ms before accelerating from the start
 const int ACCEL_DELAY = 2;          // # ms per change in speed
 
 const int TWISTY_OFFSET_THRESHOLD = 5;
 const int SAFE_OFFSET_THRESHOLD = 3;
+const int OFFSET_COUNT_THRESHOLD = 100; // # of safe cycles before accelerating again
 
 /**
  * PID Constants
  */
 
-const float KP = 0.02;
-const float KD = 0.08;
+const float STRAIGHT_KP = 0.02;
+const float STRAIGHT_KD = 0.08;
+const float TWISTY_KP = 0.02;
+const float TWISTY_KD = 0.08;
 
 const int INVERTED = 1;
 const int BOUND = BASE_SPEED / 2;
@@ -93,17 +98,6 @@ int cyclesLeft;
 
 int lowOffsetCount;
 
-state postAccel;
-
-/**
- * Private global variables
- */
-int __curSpeed;         // Used by writeWheels
-bool __prevSolidLine;   // Used by onSolidLines to remember previous state
-
-/**
- * FSM
- */
 enum states {
   INACTIVE,
   STRAIGHT,
@@ -111,7 +105,20 @@ enum states {
   LOST,
   ACCEL,
   UTURN,
-} state;
+} state, postAccel;
+
+enum uturn_states {
+    SPINUP,
+    STABLE,
+    SPINDOWN,
+} uturn_state;
+
+/**
+ * Private global variables
+ */
+
+int __curSpeed;         // Used by writeWheels
+bool __prevSolidLine;   // Used by onSolidLines to remember previous state
 
 /**
  * Helper function to update sensorValues using ECE3 library
@@ -156,14 +163,10 @@ void setFusionOutput() {
 
 /**
  * Sets offset based off of current values of global Kp, Kd, and fusionOutput
- * 
- * TODO:
- * 
- * Implement bounds to prevent negative values (May not be necessary and may be harmful by increasing delay)
  */
 void setPIDOffset() {
-    offset = kp * INVERTED * error + kd * INVERTED * (error - prevError);
-    prevError = error;
+    offset = kp * INVERTED * fusionOutput + kd * INVERTED * (fusionOutput - prevError);
+    prevError = fusionOutput;
 }
 
 /**
@@ -204,8 +207,11 @@ void setup() {
 
     // Set default values for global variables
     state = INACTIVE;
-    __curSpeed = 0;
+    uturn_state = SPINUP;
     offset = 0;
+    lowOffsetCount = 0;
+
+    __curSpeed = 0;
     __prevSolidLine = false;
     
     //Serial.begin(9600);
@@ -229,87 +235,125 @@ void printSensorValues() {
  * Primary execution loop
  */
 void loop() {
-  // Update sensorValues
-  updateValues();
-  
-  switch (state) {
-    INACTIVE:
-      if (onSolidLine()) {
-        offset = 0;
-        cyclesLeft = BASE_SPEED;
-        increment = 1;
-        postAccel = STRAIGHT;
-        state = ACCEL;
-      }
-      break;
-    STRAIGHT:
-      if (onSolidLine()) {
-        offset = 0;
-        cyclesLeft = BASE_SPEED;
-        increment = -1;
-        postAccel = UTURN;
-        state = ACCEL;
-        break;
-      }
-      offset = getPIDOutput();
-      if (offset > TWISTY_OFFSET_THRESHOLD) {
-        lowOffsetCount = 0;
-        kp = TWISTY_KP;
-        kd = TWISTY_KD;
+    // Update sensorValues
+    updateValues();
+    setFusionOutput();
+    
+    switch (state) {
+        INACTIVE:
+            // Accelerate once placed on start line
+            if (onSolidLine()) {
+                offset = 0;
+                cyclesLeft = BASE_SPEED;
+                increment = 1;
+                postAccel = STRAIGHT;
+                state = ACCEL;
+            }
+            // Wait before starting (so the person can let go of the car)
+            delay(INACTIVE_DELAY);
+            break;
+        STRAIGHT:
+            // Decelerate before uturning
+            if (onSolidLine()) {
+                offset = 0;
+                cyclesLeft = BASE_SPEED;
+                increment = -1;
+                postAccel = UTURN;
+                state = ACCEL;
+                break;
+            }
 
-        offset = 0;
-        cyclesLeft = BASE_SPEED - TWISTY_SPEED;
-        increment = -1;
-        postAccel = TWISTY;
-        state = ACCEL;
-      }
-      break;
-    TWISTY:
-      if (onSolidLine()) {
-        offset = 0;
-        cyclesLeft = TWISTY_SPEED;
-        increment = -1;
-        postAccel = UTURN;
-        state = ACCEL;
-        break;
-      }
-      offset = getPIDOutput();
-      if (offset > SAFE_OFFSET_THRESHOLD) {
-        lowOffsetCount = 0;
-        break;
-      }
-      if (lowOffsetCount == OFFSET_COUNT_THRESHOLD) {
-        kp = STRAIGHT_KP;
-        kd = STRAIGHT_KD;
+            setPIDOffset();
 
-        offset = 0;
-        cyclesLeft = BASE_SPEED - TWISTY_SPEED;
-        increment = 1;
-        postAccel = STRAIGHT;
-        state = ACCEL;
+            // Switch to twisty speed if the offset is too large
+            if (offset > TWISTY_OFFSET_THRESHOLD) {
+                kp = TWISTY_KP;
+                kd = TWISTY_KD;
+
+                offset = 0;
+                cyclesLeft = BASE_SPEED - TWISTY_SPEED;
+                increment = -1;
+                postAccel = TWISTY;
+                state = ACCEL;
+            }
+            break;
+        TWISTY:
+            // Decelerate before uturning
+            if (onSolidLine()) {
+                offset = 0;
+                cyclesLeft = TWISTY_SPEED;
+                increment = -1;
+                postAccel = UTURN;
+                state = ACCEL;
+                break;
+            }
+
+            setPIDOffset();
+
+            // Reset counter if offset is still too high (still curving)
+            if (offset > SAFE_OFFSET_THRESHOLD) {
+                lowOffsetCount = 0;
+                break;
+            }
+            lowOffsetCount++;
+
+            // Once the path has been straight for a while, accelerate again
+            if (lowOffsetCount == OFFSET_COUNT_THRESHOLD) {
+                lowOffsetCount = 0;
+                kp = STRAIGHT_KP;
+                kd = STRAIGHT_KD;
+
+                offset = 0;
+                cyclesLeft = BASE_SPEED - TWISTY_SPEED;
+                increment = 1;
+                postAccel = STRAIGHT;
+                state = ACCEL;
+            }
+            break;
+        LOST:
+                break;
+        ACCEL:
+            __curSpeed += increment;
+            if (cyclesLeft == 0) {
+            // Update prevError before entering PID controlled state if necessary
+            prevError = fusionOutput;
+            state = postAccel;
+            break;
+            }
+            cyclesLeft--;
+            delay(ACCEL_DELAY);
         break;
-      }
-      lowOffsetCount++;
-      break;
-    LOST:
-      break;
-    ACCEL:
-        __curSpeed += increment;
-        if (cyclesLeft == 0) {
-          // Update prevError before entering PID controlled state
-          prevError = getFusionOutput();
-          kp = STRAIGHT_KP;
-          kd = STRAIGHT_KD;
-          state = postAccel;
-          break;
-        }
-        cyclesLeft--;
-        delay(ACCEL_DELAY);
-      break;
-    UTURN:
-      
-      break;
-  }
-  setSpeeds();
-  writeWheels();
+        UTURN:
+            switch (uturn_state) {
+                SPINUP:
+                    if (offset == UTURN_SPEED) {
+                        uturn_state = STABLE;
+                    } else {
+                        offset++;
+                    }
+                    break;
+                STABLE:
+                    // Include encoder based break as well
+                    if (onSolidLine()) {
+                        uturn_state = SPINDOWN;
+                    }
+                    break;
+                SPINDOWN:
+                    if (offset == 0) {
+                        uturn_state = SPINUP;
+
+                        // offset = 0; already implied
+                        cyclesLeft = BASE_SPEED;
+                        increment = 1;
+                        postAccel = STRAIGHT;
+                        state = ACCEL;
+                    } else {
+                        offset--;
+                    }
+                    break;
+            }
+            break;
+    }
+    setSpeeds();
+    writeWheels();
 }
