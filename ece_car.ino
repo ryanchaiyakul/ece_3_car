@@ -13,8 +13,16 @@
  * General Constants
  */
 
-const int BASE_SPEED = 50;          // 0-255
+const int BASE_SPEED = 50;          // 0-255 straighish speed
+const int TWISTY_SPEED = 50;        // 0-255 when offset is greater than twisty threshold 
+const int SEARCH_SPEED = 10;        // 0-255 speed when track is lost
+const int UTURN_SPEED = 10;         // 0-255 uturn speed
+
 const int BLACK_THRESHOLD = 2000;   // Loest value from 0-2500 that corresponds to being on top of a black line
+const int ACCEL_DELAY = 2;          // # ms per change in speed
+
+const int TWISTY_OFFSET_THRESHOLD = 5;
+const int SAFE_OFFSET_THRESHOLD = 3;
 
 /**
  * PID Constants
@@ -67,10 +75,43 @@ const int R_PWM_PIN = 39;
 const int sensorCount = 8;
 
 /**
- * Global variables
+ * Global variables (embedded programming)
 */
+
 uint16_t sensorValues[sensorCount]; // right -> left, 0 -> 7
+
+int fusionOutput;
+int offset;
+float kp, kd;
 int prevError;
+
+int lSpeed;
+int rSpeed;
+
+int increment;
+int cyclesLeft;
+
+int lowOffsetCount;
+
+state postAccel;
+
+/**
+ * Private global variables
+ */
+int __curSpeed;         // Used by writeWheels
+bool __prevSolidLine;   // Used by onSolidLines to remember previous state
+
+/**
+ * FSM
+ */
+enum states {
+  INACTIVE,
+  STRAIGHT,
+  TWISTY,
+  LOST,
+  ACCEL,
+  UTURN,
+} state;
 
 /**
  * Helper function to update sensorValues using ECE3 library
@@ -80,89 +121,65 @@ void updateValues() {
 }
 
 /**
- * Returns the calculated fusion output of the sensorValues array
- * 
- * DOES NOT UPDATE IT
- * 
- * TODO:
- * 
- * Implement prevention against crosspiece (2500s across all sensors)
- */
-int getFusionOutput() {
-    return((- IR_WEIGHT[0] * (IR_FACTOR_0 * (sensorValues[0]-IR_MIN_0))
-            - IR_WEIGHT[1] * (IR_FACTOR_1 * (sensorValues[1]-IR_MIN_1))
-            - IR_WEIGHT[2] * (IR_FACTOR_2 * (sensorValues[2]-IR_MIN_2))
-            - IR_WEIGHT[3] * (IR_FACTOR_3 * (sensorValues[3]-IR_MIN_3))
-            + IR_WEIGHT[3] * (IR_FACTOR_4 * (sensorValues[4]-IR_MIN_4))
-            + IR_WEIGHT[2] * (IR_FACTOR_5 * (sensorValues[5]-IR_MIN_5))
-            + IR_WEIGHT[1] * (IR_FACTOR_6 * (sensorValues[6]-IR_MIN_6))
-            + IR_WEIGHT[0] * (IR_FACTOR_7 * (sensorValues[7]-IR_MIN_7)))
-            /IR_DIVISOR) - FUSION_OFFSET;
-}
-
-/**
- * Returns true when the IR sensors returns a value consistent with being on the horizontal line 
- * indicating start/stop/turnaround
+ * Returns true a singular time if a solid line is entered and will not change until it leaves and re enters a solid line
  */
 bool onSolidLine() {
     // If all of the sensors read black underneath them, it indicates the horizontal line
-    for (int i = 0 i < sensorCount; i++) {
+    for (int i = 0; i < sensorCount; i++) {
         if (sensorValues[i] < BLACK_THRESHOLD) {
+            __prevSolidLine = false;
             return false;
         }
     }
+    // Latch the output
+    if (__prevSolidLine) {
+      return false;
+    }
+    __prevSolidLine = true;
     return true;
 }
 
 /**
- * Returns offset to add and minus from BASE_SPEED for the left and right pwn signal respectively
+ * Set fusionOutput based of constants and current sensorValues readings
+ */
+void setFusionOutput() {
+    fusionOutput = ((- IR_WEIGHT[0] * (IR_FACTOR_0 * (sensorValues[0]-IR_MIN_0))
+                     - IR_WEIGHT[1] * (IR_FACTOR_1 * (sensorValues[1]-IR_MIN_1))
+                     - IR_WEIGHT[2] * (IR_FACTOR_2 * (sensorValues[2]-IR_MIN_2))
+                     - IR_WEIGHT[3] * (IR_FACTOR_3 * (sensorValues[3]-IR_MIN_3))
+                     + IR_WEIGHT[3] * (IR_FACTOR_4 * (sensorValues[4]-IR_MIN_4))
+                     + IR_WEIGHT[2] * (IR_FACTOR_5 * (sensorValues[5]-IR_MIN_5))
+                     + IR_WEIGHT[1] * (IR_FACTOR_6 * (sensorValues[6]-IR_MIN_6))
+                     + IR_WEIGHT[0] * (IR_FACTOR_7 * (sensorValues[7]-IR_MIN_7)))
+                     / IR_DIVISOR) - FUSION_OFFSET;
+}
+
+/**
+ * Sets offset based off of current values of global Kp, Kd, and fusionOutput
  * 
  * TODO:
  * 
  * Implement bounds to prevent negative values (May not be necessary and may be harmful by increasing delay)
  */
-int getPIDOutput(int error) {
-    int ret = KP * INVERTED * error + KD * INVERTED * (error - prevError);
+void setPIDOffset() {
+    offset = kp * INVERTED * error + kd * INVERTED * (error - prevError);
     prevError = error;
-    return ret;
 }
 
 /**
- * Updates the PWM pins with a new speed. (- steers to the left and + steers to the right)
+ * Updates the PWM pins with lSpeed and rSpeed
  */
-void writeWheels(int offset) {
-
-    analogWrite(L_PWM_PIN, BASE_SPEED - offset);
-    analogWrite(R_PWM_PIN, BASE_SPEED + offset);
+void writeWheels() {
+    analogWrite(L_PWM_PIN, lSpeed);
+    analogWrite(R_PWM_PIN, rSpeed);
 }
 
-/*
-* This function changes the car speed gradually (in about 30 ms) from initial
-* speed to final speed. This non-instantaneous speed change reduces the load
-* on the plastic geartrain, and reduces the failure rate of the motors.
-*/
-void ChangeBaseSpeeds(int initialLeftSpd,int finalLeftSpd, int initialRightSpd,int finalRightSpd) {
-    int diffLeft = finalLeftSpd-initialLeftSpd;
-    int diffRight = finalRightSpd-initialRightSpd;
-    int stepIncrement = 20;
-    int numStepsLeft = abs(diffLeft)/stepIncrement;
-    int numStepsRight = abs(diffRight)/stepIncrement;
-    int numSteps = max(numStepsLeft,numStepsRight);
-    int pwmLeftVal = initialLeftSpd; // initialize left wheel speed
-    int pwmRightVal = initialRightSpd; // initialize right wheel speed
-    int deltaLeft = (diffLeft)/numSteps; // left in(de)crement
-    int deltaRight = (diffRight)/numSteps; // right in(de)crement
-    
-    for(int k=0;k<numSteps;k++) {
-        pwmLeftVal = pwmLeftVal + deltaLeft;
-        pwmRightVal = pwmRightVal + deltaRight;
-        analogWrite(left_pwm_pin,pwmLeftVal);
-        analogWrite(right_pwm_pin,pwmRightVal);
-        delay(30);
-    } // end for int k
-    
-    analogWrite(left_pwm_pin,finalLeftSpd);
-    analogWrite(right_pwm_pin,finalRightSpd);
+/**
+ * Updates lSpeed and rSpeed based of offset and __curSpeed
+ */
+void setSpeeds() {
+  lSpeed = __curSpeed - offset;
+  rSpeed = __curSpeed + offset;
 }
 
 void setup() {
@@ -185,9 +202,11 @@ void setup() {
     digitalWrite(R_DIR_PIN,LOW);
     digitalWrite(R_NSLP_PIN,HIGH);
 
-    // Set Initial Previous Error
-    updateValues();
-    prevError = getFusionOutput();
+    // Set default values for global variables
+    state = INACTIVE;
+    __curSpeed = 0;
+    offset = 0;
+    __prevSolidLine = false;
     
     //Serial.begin(9600);
 }
@@ -210,7 +229,87 @@ void printSensorValues() {
  * Primary execution loop
  */
 void loop() {
+  // Update sensorValues
   updateValues();
-  int error = getFusionOutput();
-  writeWheels(getPIDOutput(error));
+  
+  switch (state) {
+    INACTIVE:
+      if (onSolidLine()) {
+        offset = 0;
+        cyclesLeft = BASE_SPEED;
+        increment = 1;
+        postAccel = STRAIGHT;
+        state = ACCEL;
+      }
+      break;
+    STRAIGHT:
+      if (onSolidLine()) {
+        offset = 0;
+        cyclesLeft = BASE_SPEED;
+        increment = -1;
+        postAccel = UTURN;
+        state = ACCEL;
+        break;
+      }
+      offset = getPIDOutput();
+      if (offset > TWISTY_OFFSET_THRESHOLD) {
+        lowOffsetCount = 0;
+        kp = TWISTY_KP;
+        kd = TWISTY_KD;
+
+        offset = 0;
+        cyclesLeft = BASE_SPEED - TWISTY_SPEED;
+        increment = -1;
+        postAccel = TWISTY;
+        state = ACCEL;
+      }
+      break;
+    TWISTY:
+      if (onSolidLine()) {
+        offset = 0;
+        cyclesLeft = TWISTY_SPEED;
+        increment = -1;
+        postAccel = UTURN;
+        state = ACCEL;
+        break;
+      }
+      offset = getPIDOutput();
+      if (offset > SAFE_OFFSET_THRESHOLD) {
+        lowOffsetCount = 0;
+        break;
+      }
+      if (lowOffsetCount == OFFSET_COUNT_THRESHOLD) {
+        kp = STRAIGHT_KP;
+        kd = STRAIGHT_KD;
+
+        offset = 0;
+        cyclesLeft = BASE_SPEED - TWISTY_SPEED;
+        increment = 1;
+        postAccel = STRAIGHT;
+        state = ACCEL;
+        break;
+      }
+      lowOffsetCount++;
+      break;
+    LOST:
+      break;
+    ACCEL:
+        __curSpeed += increment;
+        if (cyclesLeft == 0) {
+          // Update prevError before entering PID controlled state
+          prevError = getFusionOutput();
+          kp = STRAIGHT_KP;
+          kd = STRAIGHT_KD;
+          state = postAccel;
+          break;
+        }
+        cyclesLeft--;
+        delay(ACCEL_DELAY);
+      break;
+    UTURN:
+      
+      break;
+  }
+  setSpeeds();
+  writeWheels();
 }
