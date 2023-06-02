@@ -14,6 +14,7 @@
  */
 
 const int BASE_SPEED = 40;          // 0-255
+const int TURN_SPEED = 80;         // 0-255
 const int BLACK_THRESHOLD = 2300;   // Loest value from 0-2500 that corresponds to being on top of a black line
 
 /**
@@ -66,11 +67,14 @@ const int R_PWM_PIN = 39;
 
 const int sensorCount = 8;
 
+const int uturnCounts = 360;
+
 /**
  * Global variables
 */
 uint16_t sensorValues[sensorCount]; // right -> left, 0 -> 7
 int prevError;
+bool hasUturned;
 
 enum states {
   INITIAL,
@@ -196,6 +200,7 @@ void setup() {
     // Set Initial Previous Error
     updateValues();
     prevError = getFusionOutput();
+    hasUturned = false;
     state = INITIAL;
 }
 
@@ -210,7 +215,11 @@ void printSensorValues() {
       Serial.print(" ");
     }
     Serial.print("\n");
-    delay(500);
+    delay(1000);
+}
+
+int getAverageTicks() {
+  return (getEncoderCount_left() + getEncoderCount_right()) / 2;
 }
 
 
@@ -219,6 +228,7 @@ void printSensorValues() {
  */
 void loop() {
   updateValues();
+  printSensorValues();
   switch (state) {
       case INITIAL:
           ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
@@ -227,12 +237,31 @@ void loop() {
           break;
       case NORMAL:
           if (onSolidLine()) {
-            state = STOP;
+            if (hasUturned) {
+              state = STOP;
+            } else {
+              // Stop car, reset encoders, change direction, and speed up in uturn
+              ChangeBaseSpeeds(BASE_SPEED, 0, BASE_SPEED, 0);
+              resetEncoderCount_left();
+              resetEncoderCount_right();
+              digitalWrite(L_DIR_PIN,HIGH);
+              ChangeBaseSpeeds(0, TURN_SPEED, 0, TURN_SPEED);
+              state = UTURN;
+            }
             break;
           }
           writeWheels(getBasePIDOutput(getFusionOutput()));
           break;
       case UTURN:
+          if (getAverageTicks() > uturnCounts) {
+            // stop car, set to straight, accelerate, and delay to prevent stopping on the same line
+            ChangeBaseSpeeds(TURN_SPEED, 0, TURN_SPEED, 0);
+            digitalWrite(L_DIR_PIN,LOW);
+            ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
+            delay(250);
+            hasUturned = true;
+            state = NORMAL;
+          }
           break;
       case STOP:
           ChangeBaseSpeeds(BASE_SPEED, 0, BASE_SPEED, 0);
