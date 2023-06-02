@@ -13,15 +13,15 @@
  * General Constants
  */
 
-const int BASE_SPEED = 50;          // 0-255
-const int BLACK_THRESHOLD = 2000;   // Loest value from 0-2500 that corresponds to being on top of a black line
+const int BASE_SPEED = 40;          // 0-255
+const int BLACK_THRESHOLD = 2300;   // Loest value from 0-2500 that corresponds to being on top of a black line
 
 /**
  * PID Constants
  */
 
-const float KP = 0.02;
-const float KD = 0.08;
+const float BASE_KP = 0.038;
+const float BASE_KD = 0.2;
 
 const int INVERTED = 1;
 const int BOUND = BASE_SPEED / 2;
@@ -72,6 +72,14 @@ const int sensorCount = 8;
 uint16_t sensorValues[sensorCount]; // right -> left, 0 -> 7
 int prevError;
 
+enum states {
+  INITIAL,
+  NORMAL,
+  UTURN,
+  STOP,
+  END,
+} state;
+
 /**
  * Helper function to update sensorValues using ECE3 library
  */
@@ -106,7 +114,7 @@ int getFusionOutput() {
  */
 bool onSolidLine() {
     // If all of the sensors read black underneath them, it indicates the horizontal line
-    for (int i = 0 i < sensorCount; i++) {
+    for (int i = 0; i < sensorCount; i++) {
         if (sensorValues[i] < BLACK_THRESHOLD) {
             return false;
         }
@@ -121,8 +129,8 @@ bool onSolidLine() {
  * 
  * Implement bounds to prevent negative values (May not be necessary and may be harmful by increasing delay)
  */
-int getPIDOutput(int error) {
-    int ret = KP * INVERTED * error + KD * INVERTED * (error - prevError);
+int getBasePIDOutput(int error) {
+    int ret = BASE_KP * INVERTED * error + BASE_KD * INVERTED * (error - prevError);
     prevError = error;
     return ret;
 }
@@ -156,13 +164,13 @@ void ChangeBaseSpeeds(int initialLeftSpd,int finalLeftSpd, int initialRightSpd,i
     for(int k=0;k<numSteps;k++) {
         pwmLeftVal = pwmLeftVal + deltaLeft;
         pwmRightVal = pwmRightVal + deltaRight;
-        analogWrite(left_pwm_pin,pwmLeftVal);
-        analogWrite(right_pwm_pin,pwmRightVal);
+        analogWrite(L_PWM_PIN,pwmLeftVal);
+        analogWrite(R_PWM_PIN,pwmRightVal);
         delay(30);
     } // end for int k
     
-    analogWrite(left_pwm_pin,finalLeftSpd);
-    analogWrite(right_pwm_pin,finalRightSpd);
+    analogWrite(L_PWM_PIN,finalLeftSpd);
+    analogWrite(R_PWM_PIN,finalRightSpd);
 }
 
 void setup() {
@@ -188,8 +196,7 @@ void setup() {
     // Set Initial Previous Error
     updateValues();
     prevError = getFusionOutput();
-    
-    //Serial.begin(9600);
+    state = INITIAL;
 }
 
 /**
@@ -203,6 +210,7 @@ void printSensorValues() {
       Serial.print(" ");
     }
     Serial.print("\n");
+    delay(500);
 }
 
 
@@ -211,6 +219,26 @@ void printSensorValues() {
  */
 void loop() {
   updateValues();
-  int error = getFusionOutput();
-  writeWheels(getPIDOutput(error));
+  switch (state) {
+      case INITIAL:
+          ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
+          prevError = getFusionOutput();
+          state = NORMAL;
+          break;
+      case NORMAL:
+          if (onSolidLine()) {
+            state = STOP;
+            break;
+          }
+          writeWheels(getBasePIDOutput(getFusionOutput()));
+          break;
+      case UTURN:
+          break;
+      case STOP:
+          ChangeBaseSpeeds(BASE_SPEED, 0, BASE_SPEED, 0);
+          state = END;
+          break;
+      case END:
+          break;
+  }
 }
