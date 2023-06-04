@@ -14,8 +14,9 @@
  */
 
 const int BASE_SPEED = 40;          // 0-255
-const int TURN_SPEED = 80;         // 0-255
-const int BLACK_THRESHOLD = 2300;   // Loest value from 0-2500 that corresponds to being on top of a black line
+const int TURN_SPEED = 80;          // 0-255
+const int BLACK_THRESHOLD = 2200;   // Lowest value from 0-2500 that corresponds to being on top of a black line
+const int BLACK_COUNT_THRESHOLD = 6;// 0-8 needed number of sensors with black threshold
 
 /**
  * PID Constants
@@ -31,6 +32,16 @@ const int BOUND = BASE_SPEED / 2;
  * Fusion Constants
 */
 
+const int IR_MIN_0 = 618;
+const int IR_MIN_1 = 664;
+const int IR_MIN_2 = 734;
+const int IR_MIN_3 = 757;
+const int IR_MIN_4 = 805;
+const int IR_MIN_5 = 781;
+const int IR_MIN_6 = 711;
+const int IR_MIN_7 = 805;
+
+/**
 const int IR_MIN_0 = 784;
 const int IR_MIN_1 = 683;
 const int IR_MIN_2 = 752;
@@ -39,6 +50,7 @@ const int IR_MIN_4 = 660;
 const int IR_MIN_5 = 660;
 const int IR_MIN_6 = 798;
 const int IR_MIN_7 = 735;
+ */
 
 const float IR_FACTOR_0 = 0.5709065997;
 const float IR_FACTOR_1 = 0.5503577325;
@@ -51,8 +63,6 @@ const float IR_FACTOR_7 = 0.5664438654;
 
 const int IR_WEIGHT[] = {8, 4, 2, 1};
 const int IR_DIVISOR = 4;
-
-const int FUSION_OFFSET = 0;
 
 /**
  * Pins and Physical constants
@@ -67,7 +77,7 @@ const int R_PWM_PIN = 39;
 
 const int sensorCount = 8;
 
-const int uturnCounts = 360;
+const int uturnCounts = 330;
 
 /**
  * Global variables
@@ -109,21 +119,22 @@ int getFusionOutput() {
             + IR_WEIGHT[2] * (IR_FACTOR_5 * (sensorValues[5]-IR_MIN_5))
             + IR_WEIGHT[1] * (IR_FACTOR_6 * (sensorValues[6]-IR_MIN_6))
             + IR_WEIGHT[0] * (IR_FACTOR_7 * (sensorValues[7]-IR_MIN_7)))
-            /IR_DIVISOR) - FUSION_OFFSET;
+            /IR_DIVISOR);
 }
 
 /**
  * Returns true when the IR sensors returns a value consistent with being on the horizontal line 
- * indicating start/stop/turnaround
+ * indicating stop/turnaround
  */
 bool onSolidLine() {
-    // If all of the sensors read black underneath them, it indicates the horizontal line
+    // If sensor reads black underneath them, increment count and then check if the count is greater than threshold
+    int count = 0;
     for (int i = 0; i < sensorCount; i++) {
-        if (sensorValues[i] < BLACK_THRESHOLD) {
-            return false;
+        if (sensorValues[i] > BLACK_THRESHOLD) {
+            count++;
         }
     }
-    return true;
+    return count >= BLACK_COUNT_THRESHOLD;
 }
 
 /**
@@ -204,20 +215,6 @@ void setup() {
     state = INITIAL;
 }
 
-/**
- * Legacy code to print out sensorValues while testing
- * 
- * REMOVE DURING FINAL VERSION
- */
-void printSensorValues() {
-    for (int i = 0; i < sensorCount; i++) {
-      Serial.print(sensorValues[i]);
-      Serial.print(" ");
-    }
-    Serial.print("\n");
-    delay(1000);
-}
-
 int getAverageTicks() {
   return (getEncoderCount_left() + getEncoderCount_right()) / 2;
 }
@@ -228,7 +225,6 @@ int getAverageTicks() {
  */
 void loop() {
   updateValues();
-  printSensorValues();
   switch (state) {
       case INITIAL:
           ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
@@ -237,18 +233,19 @@ void loop() {
           break;
       case NORMAL:
           if (onSolidLine()) {
-            if (hasUturned) {
+             if (hasUturned) {
               state = STOP;
-            } else {
+              } else {
               // Stop car, reset encoders, change direction, and speed up in uturn
               ChangeBaseSpeeds(BASE_SPEED, 0, BASE_SPEED, 0);
+              delay(50);
               resetEncoderCount_left();
               resetEncoderCount_right();
               digitalWrite(L_DIR_PIN,HIGH);
               ChangeBaseSpeeds(0, TURN_SPEED, 0, TURN_SPEED);
               state = UTURN;
-            }
-            break;
+              }
+              break;        
           }
           writeWheels(getBasePIDOutput(getFusionOutput()));
           break;
@@ -256,9 +253,10 @@ void loop() {
           if (getAverageTicks() > uturnCounts) {
             // stop car, set to straight, accelerate, and delay to prevent stopping on the same line
             ChangeBaseSpeeds(TURN_SPEED, 0, TURN_SPEED, 0);
+            delay(50);
             digitalWrite(L_DIR_PIN,LOW);
             ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
-            delay(250);
+            delay(50);
             hasUturned = true;
             state = NORMAL;
           }
