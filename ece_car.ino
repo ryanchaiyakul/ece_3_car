@@ -13,10 +13,14 @@
  * General Constants
  */
 
-const int BASE_SPEED = 40;          // 0-255
-const int TURN_SPEED = 80;          // 0-255
-const int BLACK_THRESHOLD = 2200;   // Lowest value from 0-2500 that corresponds to being on top of a black line
-const int BLACK_COUNT_THRESHOLD = 6;// 0-8 needed number of sensors with black threshold
+const int BASE_SPEED = 40;              // 0-255
+const int FAST_SPEED = 100;             // 0-255
+const int TURN_SPEED = 110;             // 0-255
+const int BLACK_THRESHOLD = 2200;       // Lowest value from 0-2500 that corresponds to being on top of a black line
+const int BLACK_COUNT_THRESHOLD = 6;    // 0-8 needed number of sensors with black threshold
+const int FAST_OFFSET_THRESHOLD = 30;
+const int RESET_OFFSET_THRESHOLD = 35;
+const int FAST_COUNT_THRESHOLD = 300;
 
 /**
  * PID Constants
@@ -24,6 +28,9 @@ const int BLACK_COUNT_THRESHOLD = 6;// 0-8 needed number of sensors with black t
 
 const float BASE_KP = 0.038;
 const float BASE_KD = 0.2;
+
+const float FAST_KP = 0.038;
+const float FAST_KD = 0.2;
 
 const int INVERTED = 1;
 const int BOUND = BASE_SPEED / 2;
@@ -77,14 +84,18 @@ const int R_PWM_PIN = 39;
 
 const int sensorCount = 8;
 
-const int uturnCounts = 330;
+const int uturnCounts = 310;
 
 /**
  * Global variables
 */
 uint16_t sensorValues[sensorCount]; // right -> left, 0 -> 7
 int prevError;
+int newOffset;
+int lowCount;
+int curSpeed;
 bool hasUturned;
+bool inStraight;
 
 enum states {
   INITIAL,
@@ -139,13 +150,18 @@ bool onSolidLine() {
 
 /**
  * Returns offset to add and minus from BASE_SPEED for the left and right pwn signal respectively
- * 
- * TODO:
- * 
- * Implement bounds to prevent negative values (May not be necessary and may be harmful by increasing delay)
  */
 int getBasePIDOutput(int error) {
     int ret = BASE_KP * INVERTED * error + BASE_KD * INVERTED * (error - prevError);
+    prevError = error;
+    return ret;
+}
+
+/**
+ * Returns offset to add and minus from BASE_SPEED for the left and right pwn signal respectively
+ */
+int getFastPIDOutput(int error) {
+    int ret = FAST_KP * INVERTED * error + FAST_KD * INVERTED * (error - prevError);
     prevError = error;
     return ret;
 }
@@ -155,8 +171,8 @@ int getBasePIDOutput(int error) {
  */
 void writeWheels(int offset) {
 
-    analogWrite(L_PWM_PIN, BASE_SPEED - offset);
-    analogWrite(R_PWM_PIN, BASE_SPEED + offset);
+    analogWrite(L_PWM_PIN, curSpeed - offset);
+    analogWrite(R_PWM_PIN, curSpeed + offset);
 }
 
 /*
@@ -211,8 +227,11 @@ void setup() {
     // Set Initial Previous Error
     updateValues();
     prevError = getFusionOutput();
+    lowCount = 0;
     hasUturned = false;
+    inStraight = false;
     state = INITIAL;
+    curSpeed = BASE_SPEED;
 }
 
 int getAverageTicks() {
@@ -247,7 +266,30 @@ void loop() {
               }
               break;        
           }
-          writeWheels(getBasePIDOutput(getFusionOutput()));
+          
+          newOffset = getBasePIDOutput(getFusionOutput());
+          if (inStraight) {
+            if (abs(newOffset) > RESET_OFFSET_THRESHOLD) {
+              ChangeBaseSpeeds(FAST_SPEED, BASE_SPEED, FAST_SPEED, BASE_SPEED);
+              curSpeed = BASE_SPEED;
+              inStraight = false;
+              lowCount = 0;
+            }
+          } else {
+            if (lowCount > FAST_COUNT_THRESHOLD) {
+              ChangeBaseSpeeds(BASE_SPEED, FAST_SPEED, BASE_SPEED, FAST_SPEED);
+              curSpeed = FAST_SPEED;
+              inStraight = true;
+            } else {
+              if (abs(newOffset) > FAST_OFFSET_THRESHOLD) {
+                lowCount = 0;
+              } else {
+                lowCount++;
+              }
+            }
+          }
+
+          writeWheels(newOffset);
           break;
       case UTURN:
           if (getAverageTicks() > uturnCounts) {
@@ -258,6 +300,7 @@ void loop() {
             ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
             delay(50);
             hasUturned = true;
+            inStraight = false;
             state = NORMAL;
           }
           break;
