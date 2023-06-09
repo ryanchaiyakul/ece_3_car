@@ -14,16 +14,23 @@
  */
 
 const int BASE_SPEED = 40;          // 0-255
-const int TURN_SPEED = 80;          // 0-255
+const int FAST_SPEED = 80;          // 0-255
+const int TURN_SPEED = 120;          // 0-255
 const int BLACK_THRESHOLD = 2200;   // Lowest value from 0-2500 that corresponds to being on top of a black line
 const int BLACK_COUNT_THRESHOLD = 6;// 0-8 needed number of sensors with black threshold
+
+const int HARD_SECTION_TIME = 10000;
+const int HARD_SECTION_DURATION = 8000;
 
 /**
  * PID Constants
  */
 
+const float FAST_KP = 0.067;
+const float FAST_KD = 0.32;
+
 const float BASE_KP = 0.038;
-const float BASE_KD = 0.2;
+const float BASE_KD = 0.24;
 
 const int INVERTED = 1;
 const int BOUND = BASE_SPEED / 2;
@@ -32,6 +39,16 @@ const int BOUND = BASE_SPEED / 2;
  * Fusion Constants
 */
 
+const int IR_MIN_0 = 549;
+const int IR_MIN_1 = 573;
+const int IR_MIN_2 = 643;
+const int IR_MIN_3 = 643;
+const int IR_MIN_4 = 715;
+const int IR_MIN_5 = 619;
+const int IR_MIN_6 = 549;
+const int IR_MIN_7 = 619;
+
+/**
 const int IR_MIN_0 = 618;
 const int IR_MIN_1 = 664;
 const int IR_MIN_2 = 734;
@@ -39,7 +56,9 @@ const int IR_MIN_3 = 757;
 const int IR_MIN_4 = 805;
 const int IR_MIN_5 = 781;
 const int IR_MIN_6 = 711;
-const int IR_MIN_7 = 805;
+const int IR_MIN_7 = 805; 
+ */
+
 
 /**
 const int IR_MIN_0 = 784;
@@ -84,7 +103,10 @@ const int uturnCounts = 330;
 */
 uint16_t sensorValues[sensorCount]; // right -> left, 0 -> 7
 int prevError;
+int baseSpeed;
 bool hasUturned;
+int startTime;
+int curTime;
 
 enum states {
   INITIAL,
@@ -150,13 +172,19 @@ int getBasePIDOutput(int error) {
     return ret;
 }
 
+int getFastPIDOutput(int error) {
+    int ret = FAST_KP * INVERTED * error + FAST_KD * INVERTED * (error - prevError);
+    prevError = error;
+    return ret;
+}
+
 /**
  * Updates the PWM pins with a new speed. (- steers to the left and + steers to the right)
  */
 void writeWheels(int offset) {
 
-    analogWrite(L_PWM_PIN, BASE_SPEED - offset);
-    analogWrite(R_PWM_PIN, BASE_SPEED + offset);
+    analogWrite(L_PWM_PIN, baseSpeed - offset);
+    analogWrite(R_PWM_PIN, baseSpeed + offset);
 }
 
 /*
@@ -213,6 +241,8 @@ void setup() {
     prevError = getFusionOutput();
     hasUturned = false;
     state = INITIAL;
+    startTime = millis();
+    baseSpeed = FAST_SPEED;
 }
 
 int getAverageTicks() {
@@ -225,9 +255,10 @@ int getAverageTicks() {
  */
 void loop() {
   updateValues();
+  curTime = millis(); 
   switch (state) {
       case INITIAL:
-          ChangeBaseSpeeds(0, BASE_SPEED, 0, BASE_SPEED);
+          ChangeBaseSpeeds(0, FAST_SPEED, 0, FAST_SPEED);
           prevError = getFusionOutput();
           state = NORMAL;
           break;
@@ -247,7 +278,19 @@ void loop() {
               }
               break;        
           }
-          writeWheels(getBasePIDOutput(getFusionOutput()));
+          if (curTime - startTime > HARD_SECTION_TIME && curTime - startTime < HARD_SECTION_TIME + HARD_SECTION_DURATION) {
+            if (baseSpeed != BASE_SPEED) {
+              ChangeBaseSpeeds(FAST_SPEED, BASE_SPEED, FAST_SPEED, BASE_SPEED);
+            }
+            baseSpeed = BASE_SPEED;
+            writeWheels(getBasePIDOutput(getFusionOutput()));
+          } else {
+            if (baseSpeed != FAST_SPEED) {
+              ChangeBaseSpeeds(BASE_SPEED, FAST_SPEED, BASE_SPEED, FAST_SPEED);
+            }
+            baseSpeed = FAST_SPEED;
+            writeWheels(getFastPIDOutput(getFusionOutput()));
+          }
           break;
       case UTURN:
           if (getAverageTicks() > uturnCounts) {
